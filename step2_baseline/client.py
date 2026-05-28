@@ -13,7 +13,7 @@ sys.path.insert(0, ".")
 from step2_baseline.model import MNISTCNN, get_parameters, set_parameters
 
 
-class FLClient(fl.client.NumArrayClient):
+class FLClient(fl.client.NumPyClient):
     """Flower 客户端：本地训练 + 评估"""
     def __init__(self, train_loader, test_loader, device="cpu"):
         self.model = MNISTCNN().to(device)
