@@ -74,7 +74,7 @@ def get_test_loader(batch_size=256):
 
 
 def get_client_labels(train_set, client_indices):
-    """获取每个客户端的标签分布（用于质量评估）"""
+    """获取每个客户端的标签分布（用于 KL 散度计算）"""
     client_labels = []
     for indices in client_indices:
         labels = np.array([train_set[i][1] for i in indices])
