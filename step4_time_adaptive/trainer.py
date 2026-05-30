@@ -55,7 +55,7 @@ def train_one_round(master_params, train_loader, epsilon, *, delta=config.DELTA,
     criterion = nn.CrossEntropyLoss()
 
     # ---- 创建新模型并加载 master 参数 ----
-    local_model = MNISTCNN()
+    local_model = MNISTCNN().to(device)
     set_parameters(local_model, master_params)
     params_before = master_params  # 训练前的参数就是 master_params
 
@@ -203,7 +203,7 @@ def run_training(strategy_name, train_loader, test_loader,
     t0 = time.time()
 
     # 评估用模型
-    eval_model = MNISTCNN()
+    eval_model = MNISTCNN().to(config.DEVICE)
 
     # 对于固定调度策略，预计算 schedule
     if strategy_name in ("Uniform", "KianiLinear"):

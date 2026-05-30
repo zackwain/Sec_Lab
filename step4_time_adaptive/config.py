@@ -1,4 +1,5 @@
 """统一配置 — 所有超参数集中管理"""
+import torch
 
 # ============================================================
 # 隐私参数
@@ -13,9 +14,9 @@ MAX_GRAD_NORM = 1.0           # 梯度裁剪阈值 C
 MAX_ROUNDS = 20               # 最大通信轮数
 EPOCHS_PER_ROUND = 1          # 每轮本地 epoch
 LR = 0.01                     # 学习率
-BATCH_SIZE = 64               # 批大小
+BATCH_SIZE = 600              # 批大小（与 Abadi 一致，q=0.01）
 MOMENTUM = 0.9                # SGD 动量
-DEVICE = "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================================
 # 调度参数
