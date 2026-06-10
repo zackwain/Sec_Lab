@@ -260,7 +260,7 @@ def run_training(strategy_name, train_loader, test_loader,
         if verbose:
             print(f"  [{strategy_name:>20}] Round {rnd:2d}: "
                   f"acc={acc:.4f}, ε={eps_r:.3f}, "
-                  f"momentum={momentum:+.3f}, Σε={cumulative_eps:.2f}")
+                  f"momentum={momentum:+.3f}, Σε={cumulative_eps:.3f}")
 
         # ---- 早停 ----
         if acc > config.EARLY_STOP_ACC and rnd >= 5:

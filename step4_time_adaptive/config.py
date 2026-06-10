@@ -1,4 +1,6 @@
 """统一配置 — 所有超参数集中管理"""
+import random
+import numpy as np
 import torch
 
 # ============================================================
@@ -57,3 +59,25 @@ STRATEGY_CONFIGS = {
         "gamma": 2.0,
     },
 }
+
+# ============================================================
+# 重复实验种子
+# ============================================================
+# 每个 repeat 用不同种子，保证模型初始化、数据 shuffle、DP 噪声独立采样
+SEEDS = [SEED + i * 100 for i in range(N_REPEATS)]  # [42, 142, 242]
+
+
+def set_seed(seed: int):
+    """固定所有随机源，保证可复现。
+
+    不同种子 → 不同的模型初始化 / 数据打乱 / DP 噪声采样。
+    同一种子 → 结果完全一致。
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
