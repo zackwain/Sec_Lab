@@ -24,28 +24,31 @@ from step4_time_adaptive.scheduler import (
 
 def train_one_round(master_params, train_loader, epsilon, *, delta=config.DELTA,
                     max_grad_norm=config.MAX_GRAD_NORM, lr=config.LR,
-                    epochs=config.EPOCHS_PER_ROUND, device=config.DEVICE):
-    """单轮 (epsilon, delta)-DP 训练。
+                    epochs=config.EPOCHS_PER_ROUND, device=config.DEVICE,
+                    use_dp=True):
+    """单轮训练（可选 DP）。
 
-    每轮创建全新的模型和 PrivacyEngine，避免 Opacus hook 冲突。
-    总隐私通过基本组合追踪：R 轮后 = (Σε_r, R×δ)-DP。
+    每轮创建全新的模型，避免 Opacus hook 冲突。
+    use_dp=True:  DP-SGD（PrivacyEngine + 梯度裁剪 + 高斯噪声）
+    use_dp=False: 标准 SGD（无隐私保护，MIA 基线用）
 
     Args:
         master_params: 从主模型拷贝的参数（list of numpy arrays）
         train_loader: 训练数据 DataLoader
-        epsilon: 本轮 ε
+        epsilon: 本轮 ε（use_dp=False 时忽略）
         delta: DP δ
         max_grad_norm: 裁剪阈值 C
         lr: 学习率
         epochs: 本地 epoch 数
         device: 计算设备
+        use_dp: 是否启用差分隐私
 
     Returns:
         dict: {
             "params":         训练后模型参数,
             "loss_before":    训练前 loss,
             "loss_after":     训练后 loss,
-            "eps_spent":      Opacus 报告的实际 ε 消耗,
+            "eps_spent":      实际 ε 消耗（use_dp=False 时为 0）,
             "params_before":  训练前模型参数 (numpy),
             "num_samples":    训练样本数,
         }
@@ -70,8 +73,8 @@ def train_one_round(master_params, train_loader, epsilon, *, delta=config.DELTA,
             n_before += images.size(0)
     loss_before /= max(n_before, 1)
 
-    # ---- 预算太小则跳过训练 ----
-    if epsilon < 0.02:
+    # ---- 预算太小则跳过训练（仅 DP 模式） ----
+    if use_dp and epsilon < 0.02:
         return {
             "params": master_params,
             "loss_before": loss_before,
@@ -81,35 +84,57 @@ def train_one_round(master_params, train_loader, epsilon, *, delta=config.DELTA,
             "num_samples": 0,
         }
 
-    # ---- DP-SGD 训练 ----
-    sigma = epsilon_to_sigma(epsilon, delta, sample_rate, epochs=epochs)
+    # ---- 训练 ----
+    if use_dp:
+        # DP-SGD: PrivacyEngine 包装
+        sigma = epsilon_to_sigma(epsilon, delta, sample_rate, epochs=epochs)
 
-    local_model.train()
-    optimizer = torch.optim.SGD(local_model.parameters(), lr=lr,
-                                momentum=config.MOMENTUM)
-    dp_loader = torch.utils.data.DataLoader(
-        train_loader.dataset, batch_size=train_loader.batch_size, shuffle=True,
-    )
+        local_model.train()
+        optimizer = torch.optim.SGD(local_model.parameters(), lr=lr,
+                                    momentum=config.MOMENTUM)
+        dp_loader = torch.utils.data.DataLoader(
+            train_loader.dataset, batch_size=train_loader.batch_size, shuffle=True,
+        )
 
-    privacy_engine = PrivacyEngine()
-    local_model, optimizer, dp_loader = privacy_engine.make_private(
-        module=local_model, optimizer=optimizer, data_loader=dp_loader,
-        noise_multiplier=sigma, max_grad_norm=max_grad_norm,
-    )
+        privacy_engine = PrivacyEngine()
+        local_model, optimizer, dp_loader = privacy_engine.make_private(
+            module=local_model, optimizer=optimizer, data_loader=dp_loader,
+            noise_multiplier=sigma, max_grad_norm=max_grad_norm,
+        )
 
-    total_loss, num_samples = 0.0, 0
-    for _ in range(epochs):
-        for images, labels in dp_loader:
-            images, labels = images.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = local_model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item() * images.size(0)
-            num_samples += images.size(0)
+        total_loss, num_samples = 0.0, 0
+        for _ in range(epochs):
+            for images, labels in dp_loader:
+                images, labels = images.to(device), labels.to(device)
+                optimizer.zero_grad()
+                outputs = local_model(images)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item() * images.size(0)
+                num_samples += images.size(0)
 
-    eps_spent = privacy_engine.get_epsilon(delta=delta)
+        eps_spent = privacy_engine.get_epsilon(delta=delta)
+
+    else:
+        # 标准 SGD（无 DP，MIA 基线用）
+        local_model.train()
+        optimizer = torch.optim.SGD(local_model.parameters(), lr=lr,
+                                    momentum=config.MOMENTUM)
+
+        total_loss, num_samples = 0.0, 0
+        for _ in range(epochs):
+            for images, labels in train_loader:
+                images, labels = images.to(device), labels.to(device)
+                optimizer.zero_grad()
+                outputs = local_model(images)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item() * images.size(0)
+                num_samples += images.size(0)
+
+        eps_spent = 0.0
 
     # ---- 训练后状态 ----
     unwrapped = getattr(local_model, '_module', local_model)
@@ -168,6 +193,9 @@ def evaluate(model, test_loader, device=config.DEVICE):
 def run_training(strategy_name, train_loader, test_loader,
                  total_epsilon=config.TOTAL_EPSILON,
                  max_rounds=config.MAX_ROUNDS,
+                 gamma=config.GAMMA,
+                 use_dp=True,
+                 return_model=False,
                  verbose=True):
     """运行完整训练流程。
 
@@ -178,8 +206,11 @@ def run_training(strategy_name, train_loader, test_loader,
         strategy_name: "Uniform" | "KianiLinear" | "KianiPlusMomentum"
         train_loader: 训练数据 DataLoader
         test_loader: 测试数据 DataLoader
-        total_epsilon: 总隐私预算
+        total_epsilon: 总隐私预算（use_dp=False 时忽略）
         max_rounds: 最大轮数
+        gamma: 损失动量指数响应强度（仅 KianiPlusMomentum 使用）
+        use_dp: 是否启用差分隐私
+        return_model: 是否返回最终模型参数（MIA 用）
         verbose: 是否打印每轮进度
 
     Returns:
@@ -192,6 +223,7 @@ def run_training(strategy_name, train_loader, test_loader,
             "per_round":       [{round, accuracy, loss, epsilon, momentum, ...}],
             "loss_history":    [每轮 loss],
             "momentum_history": [每轮动量],
+            "model_params":    最终模型参数（仅 return_model=True）,
         }
     """
     # 主模型：维护为 numpy 参数，每轮 train_one_round 内部创建新模型
@@ -213,29 +245,35 @@ def run_training(strategy_name, train_loader, test_loader,
 
     for rnd in range(1, max_rounds + 1):
         # ---- 确定本轮 ε ----
-        if strategy_name == "KianiPlusMomentum":
-            # 动态计算
-            dynamic_schedule = create_schedule(
-                strategy_name, total_epsilon, max_rounds,
-                loss_history=loss_history, gamma=config.GAMMA,
-            )
-            eps_r = dynamic_schedule[rnd - 1]
-            # 计算当前动量（取最近窗口）
-            momentum = loss_momentum(loss_history) if len(loss_history) >= 3 else 0.0
+        if use_dp:
+            if strategy_name == "KianiPlusMomentum":
+                # 动态计算
+                dynamic_schedule = create_schedule(
+                    strategy_name, total_epsilon, max_rounds,
+                    loss_history=loss_history, gamma=gamma,
+                )
+                eps_r = dynamic_schedule[rnd - 1]
+                # 计算当前动量（取最近窗口）
+                momentum = loss_momentum(loss_history) if len(loss_history) >= 3 else 0.0
+            else:
+                eps_r = fixed_schedule[rnd - 1]
+                momentum = 0.0
+
+            momentum_history.append(float(momentum))
+
+            # 不能超花
+            if cumulative_eps + eps_r > total_epsilon:
+                eps_r = total_epsilon - cumulative_eps
+            if eps_r < 0.01:
+                eps_r = 0.01
         else:
-            eps_r = fixed_schedule[rnd - 1]
+            # 无 DP 模式：ε = 0，无动量
+            eps_r = 0.0
             momentum = 0.0
 
-        momentum_history.append(float(momentum))
-
-        # 不能超花
-        if cumulative_eps + eps_r > total_epsilon:
-            eps_r = total_epsilon - cumulative_eps
-        if eps_r < 0.01:
-            eps_r = 0.01
-
         # ---- 训练一轮 ----
-        result = train_one_round(master_params, train_loader, eps_r)
+        result = train_one_round(master_params, train_loader, eps_r,
+                                use_dp=use_dp)
         master_params = result["params"]
         cumulative_eps += result["eps_spent"]
 
@@ -271,7 +309,7 @@ def run_training(strategy_name, train_loader, test_loader,
     duration = time.time() - t0
     final_acc = rounds_data[-1]["accuracy"] if rounds_data else 0.0
 
-    return {
+    result = {
         "strategy": strategy_name,
         "final_accuracy": final_acc,
         "rounds_completed": len(rounds_data),
@@ -281,3 +319,8 @@ def run_training(strategy_name, train_loader, test_loader,
         "loss_history": [float(l) for l in loss_history],
         "momentum_history": [float(m) for m in momentum_history],
     }
+
+    if return_model:
+        result["model_params"] = master_params
+
+    return result
